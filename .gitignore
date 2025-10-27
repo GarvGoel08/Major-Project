@@ -1,0 +1,6 @@
+*.pth
+*.png
+*.svg
+install_pytorch.py
+check_gpu.py
+*/
