@@ -4,3 +4,4 @@
 install_pytorch.py
 check_gpu.py
 */
+check_leakage.py

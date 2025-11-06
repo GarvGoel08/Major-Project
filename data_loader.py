@@ -60,7 +60,7 @@ def load_datasets(data_dir='Datasets/Train'):
             # If column names don't match, assume they're in the correct order
             if list(df.columns) != expected_columns:
                 print(f"  Warning: Column names don't match expected. Using first 18 columns.")
-                df = df.iloc[:, 1:19]
+                df = df.iloc[:, 2:20]
                 df.columns = expected_columns
             
             # Get the data
@@ -68,7 +68,7 @@ def load_datasets(data_dir='Datasets/Train'):
             
             # Use 17000 entries for training, rest for testing
             n_samples = len(data)
-            train_size = min(12000, n_samples)  # Use 17000 or less if dataset is smaller
+            train_size = min(17000, n_samples)  # Use 17000 or less if dataset is smaller
 
             # Use first 17000 for training
             train_data = data[:train_size]
@@ -156,7 +156,17 @@ def prepare_data_for_model(X_train, X_test, y_train, y_test, max_seq_length=100,
     
     # Normalize the data
     scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
+    # Fit scaler on training data first
+    scaler.fit(X_train)
+
+    # Protect against zero std (which would cause division by zero -> NaN)
+    if hasattr(scaler, 'scale_'):
+        zero_scale_mask = scaler.scale_ == 0
+        if np.any(zero_scale_mask):
+            print("  Warning: some features have zero standard deviation. Replacing zeros with 1.0 to avoid NaNs.")
+            scaler.scale_[zero_scale_mask] = 1.0
+
+    X_train_scaled = scaler.transform(X_train)
     X_test_scaled = scaler.transform(X_test)
     
     # Create proper sliding windows instead of repetition
@@ -211,6 +221,18 @@ def prepare_data_for_model(X_train, X_test, y_train, y_test, max_seq_length=100,
     y_train_seq = np.hstack(y_train_windows)
     X_test_seq = np.vstack(X_test_windows)
     y_test_seq = np.hstack(y_test_windows)
+
+    # Check for NaNs introduced during preprocessing/windowing
+    nan_train_windows = np.isnan(X_train_seq).any(axis=(1, 2))
+    if np.any(nan_train_windows):
+        print(f"  Warning: {np.sum(nan_train_windows)} training windows contain NaNs. Indices: {np.where(nan_train_windows)[0][:10]}")
+        # Replace NaNs with zero (safe fallback) and continue
+        X_train_seq[np.isnan(X_train_seq)] = 0.0
+
+    nan_test_windows = np.isnan(X_test_seq).any(axis=(1, 2))
+    if np.any(nan_test_windows):
+        print(f"  Warning: {np.sum(nan_test_windows)} test windows contain NaNs. Indices: {np.where(nan_test_windows)[0][:10]}")
+        X_test_seq[np.isnan(X_test_seq)] = 0.0
     
     # Shuffle training data
     train_indices = np.random.permutation(len(X_train_seq))

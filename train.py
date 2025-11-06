@@ -54,6 +54,108 @@ criterion = nn.CrossEntropyLoss()
 print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 print(f"Training on device: {device}")
 
+
+def debug_check_first_batch(model, train_loader, criterion, device):
+    """Run one batch through the model and print diagnostics to catch NaNs/inf early."""
+    model.eval()
+    try:
+        data, target = next(iter(train_loader))
+    except StopIteration:
+        print("No data in train_loader to debug.")
+        return
+
+    data, target = data.to(device), target.to(device)
+
+    # Input checks
+    print("\n[DEBUG] First batch stats:")
+    print(f"  data dtype: {data.dtype}, shape: {data.shape}")
+    print(f"  any NaN in input: {torch.isnan(data).any().item()}")
+    print(f"  any Inf in input: {torch.isinf(data).any().item()}")
+    try:
+        print(f"  input min/max/mean: {data.min().item():.6f} / {data.max().item():.6f} / {data.mean().item():.6f}")
+    except Exception:
+        pass
+
+    # Forward pass checks
+    with torch.no_grad():
+        output = model(data)
+        print(f"  output shape: {output.shape}")
+        print(f"  any NaN in output: {torch.isnan(output).any().item()}")
+        print(f"  any Inf in output: {torch.isinf(output).any().item()}")
+        try:
+            print(f"  output min/max/mean: {output.min().item():.6f} / {output.max().item():.6f} / {output.mean().item():.6f}")
+        except Exception:
+            pass
+
+    # Loss check
+    loss = criterion(output, target)
+    print(f"  loss on first batch: {loss.item()}")
+    if torch.isnan(loss) or torch.isinf(loss):
+        raise RuntimeError("NaN/Inf loss detected on first batch. Check inputs, model, or loss settings.")
+
+    model.train()
+
+
+def diagnose_batch(model, data, device):
+    """Run a detailed forward pass and print intermediate stats for each branch to find where NaNs originate."""
+    model.eval()
+    data = data.to(device)
+    batch_size = data.size(0)
+
+    # Print input diagnostics
+    try:
+        print(f"[DIAG] input any NaN: {torch.isnan(data).any().item()} | any Inf: {torch.isinf(data).any().item()}")
+        print(f"[DIAG] input min/max/mean: {data.min().item():.6f}/{data.max().item():.6f}/{data.mean().item():.6f}")
+    except Exception:
+        pass
+
+    try:
+        # CNN branch
+        cnn_input = data.transpose(1, 2)
+        cnn_out = torch.relu(model.cnn_conv1(cnn_input))
+        print(f"[DIAG] CNN conv1 out NaN? {torch.isnan(cnn_out).any().item()} | min/max: {cnn_out.min().item():.6f}/{cnn_out.max().item():.6f}")
+        cnn_out = model.cnn_pool1(cnn_out)
+        cnn_out = torch.relu(model.cnn_conv2(cnn_out))
+        print(f"[DIAG] CNN conv2 out NaN? {torch.isnan(cnn_out).any().item()} | min/max: {cnn_out.min().item():.6f}/{cnn_out.max().item():.6f}")
+        cnn_out = model.cnn_pool2(cnn_out)
+        cnn_out_flat = cnn_out.view(batch_size, -1)
+        print(f"[DIAG] CNN flat NaN? {torch.isnan(cnn_out_flat).any().item()} | shape: {cnn_out_flat.shape}")
+
+        # LSTM branch
+        lstm_out1, (h1, c1) = model.lstm1(data)
+        print(f"[DIAG] LSTM1 out NaN? {torch.isnan(lstm_out1).any().item()} | h1 min/max: {h1.min().item():.6f}/{h1.max().item():.6f}")
+        lstm_out2, (h2, c2) = model.lstm2(lstm_out1)
+        lstm_feat = h2[-1]
+        print(f"[DIAG] LSTM2 feat NaN? {torch.isnan(lstm_feat).any().item()} | shape: {lstm_feat.shape}")
+
+        # Transformer branch
+        trans_out = model.transformer_block(data)
+        print(f"[DIAG] Transformer block out NaN? {torch.isnan(trans_out).any().item()} | min/max: {trans_out.min().item():.6f}/{trans_out.max().item():.6f}")
+        trans_feat = torch.mean(trans_out, dim=1)
+        print(f"[DIAG] Transformer feat NaN? {torch.isnan(trans_feat).any().item()} | shape: {trans_feat.shape}")
+
+        # Fusion
+        concatenated = torch.cat([cnn_out_flat, lstm_feat, trans_feat], dim=1)
+        print(f"[DIAG] Concatenated NaN? {torch.isnan(concatenated).any().item()} | shape: {concatenated.shape}")
+        fused = model.fusion(concatenated)
+        print(f"[DIAG] Fused NaN? {torch.isnan(fused).any().item()} | min/max: {fused.min().item():.6f}/{fused.max().item():.6f}")
+
+        # Classifier
+        out = model.classifier(fused)
+        print(f"[DIAG] Final output NaN? {torch.isnan(out).any().item()} | min/max: {out.min().item():.6f}/{out.max().item():.6f}")
+    except Exception as e:
+        print(f"[DIAG ERROR] Exception during diagnosis: {e}")
+    finally:
+        model.train()
+
+# Run quick debug check before training
+try:
+    debug_check_first_batch(model, train_loader, criterion, device)
+except Exception as e:
+    print(f"\n[ERROR] Debug check failed: {e}")
+    print("Aborting training to avoid corrupting training run. Fix the root cause and retry.")
+    sys.exit(1)
+
 # Training function with progress bar
 def train_epoch(model, train_loader, optimizer, criterion, device, epoch, epochs):
     model.train()
@@ -70,7 +172,35 @@ def train_epoch(model, train_loader, optimizer, criterion, device, epoch, epochs
         optimizer.zero_grad()
         output = model(data)
         loss = criterion(output, target)
+
+        # If loss is NaN or Inf, abort this epoch and surface diagnostics
+        if torch.isnan(loss) or torch.isinf(loss):
+            print(f"\n[ERROR] Loss is NaN or Inf at batch {batch_idx+1}. Aborting training.\n")
+            # Print some diagnostics
+            print(f"  any NaN in output: {torch.isnan(output).any().item()}")
+            print(f"  any Inf in output: {torch.isinf(output).any().item()}")
+            # Run detailed diagnosis to find which branch produces NaNs
+            try:
+                diagnose_batch(model, data, device)
+            except Exception as _:
+                pass
+            raise RuntimeError("NaN/Inf loss during training")
+
         loss.backward()
+
+        # Gradient clipping to avoid explosion
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
+        # Check for NaNs in gradients
+        any_grad_nan = False
+        for p in model.parameters():
+            if p.grad is not None and torch.isnan(p.grad).any():
+                any_grad_nan = True
+                break
+        if any_grad_nan:
+            print(f"\n[ERROR] NaN detected in gradients at batch {batch_idx+1}. Aborting training.")
+            raise RuntimeError("NaN in gradients")
+
         optimizer.step()
         
         total_loss += loss.item()
