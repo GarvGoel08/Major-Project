@@ -16,7 +16,8 @@ print("Loading datasets...")
 X_train, X_test, y_train, y_test, class_to_idx = load_datasets('Datasets/Train')
 
 print("\nPreparing data for PyTorch model...")
-max_seq_length = 500
+# Reduce sequence length to produce more independent test windows and more training samples
+max_seq_length = 200
 num_features = 18
 num_classes = 6
 batch_size = 32
@@ -26,6 +27,22 @@ X_train_tensor, X_test_tensor, y_train_tensor, y_test_tensor, scaler = prepare_p
     max_seq_length=max_seq_length, 
     num_classes=num_classes
 )
+
+# Quick leakage check: compute min L2 distance from each test window to all train windows
+try:
+    X_train_np = X_train_tensor.numpy()
+    X_test_np = X_test_tensor.numpy()
+    min_dists = []
+    for i in range(X_test_np.shape[0]):
+        diffs = X_train_np - X_test_np[i:i+1]
+        dists = np.linalg.norm(diffs.reshape(diffs.shape[0], -1), axis=1)
+        min_dists.append(dists.min())
+    min_dists = np.array(min_dists)
+    print(f"\n[LEAKAGE CHECK] test windows: {len(min_dists)}, min/mean/max distance to closest train window: {min_dists.min():.6e}/{min_dists.mean():.6e}/{min_dists.max():.6e}")
+    very_close = (min_dists < 1e-6).sum()
+    print(f"[LEAKAGE CHECK] test windows with almost-identical train window (<1e-6): {very_close}")
+except Exception as e:
+    print(f"[LEAKAGE CHECK] skipped due to error: {e}")
 
 # Create data loaders
 train_loader, test_loader = create_data_loaders(
@@ -48,7 +65,7 @@ model = build_hybrid_model(
 )
 
 # Setup optimizer and loss function
-optimizer = optim.Adam(model.parameters(), lr=1e-4)
+optimizer = optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-4)
 criterion = nn.CrossEntropyLoss()
 
 print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
